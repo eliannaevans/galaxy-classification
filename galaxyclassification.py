@@ -31,6 +31,7 @@ path = "drive/MyDrive/GalaxyClassification"
 image_path = "drive/MyDrive/GalaxyClassification/training_images"
 processed_data_path = "drive/MyDrive/GalaxyClassification/processed_data.csv"
 
+# this is the csv file containing the table from the original dataset
 solutions = pd.read_csv("drive/MyDrive/GalaxyClassification/training_solutions_rev1.csv")
 solutions
 
@@ -85,6 +86,8 @@ solutions
 * Class 11.6: Can't tell arm number
 
 # Test Image Data and Methods
+
+In this section, I am examining the original images to find the right deminsions to crop them to so that, even in an image with other galaxies, the model can focus on the central galaxy.
 """
 
 # find amount to crop galaxies to get the main image to classify
@@ -104,33 +107,36 @@ def crop_galaxy(image):
 # check another random galaxy to ensure that cropping is generalizable
 crop_galaxy(Image.open("drive/MyDrive/GalaxyClassification/training_images/121413.jpg"))
 
-"""# Data Preprocessing"""
+"""# Data Preprocessing
+
+In this section, I am pre-processing both the image and table data for my first model and formatting it in a Pandas dataframe, so that the relevant parts of the data will be reusable for later models.
+"""
 
 # removes extention from filename, in this case leaving the image id
 def get_id(filename):
   id = os.path.splitext(filename)[0]
   return int(id)
 
-# Process images into RGB pixel arrays, artificially creating new data
-img_list = []
-id_list = []
-for filename in os.listdir(image_path):
+# Process 527 images into RGB pixel arrays, artificially creating new data
+img_list = [] # stores a list of RGB pixel arrays for each image rotation
+id_list = [] # stores a list of 8 ids per image for each rotation
+for filename in os.listdir(image_path): # images are stored on my Google Drive
   id = get_id(filename) # get id from filename
   single_image_path = os.path.join(image_path, filename)
   image = Image.open(single_image_path)
-  image = crop_galaxy(image)
+  image = crop_galaxy(image) # using the function defined in the Test Image section
 
   for angle in (0,45,90,135,180,225,270,315):
     rotated_image = image.rotate(angle) # create new images through rotation
-    img_list.append(img_to_array(rotated_image.resize((50,50))))
-    id_list.append(id)
+    img_list.append(img_to_array(rotated_image.resize((50,50)))) # resize a final time to reduce data dimensionality
+    id_list.append(id) # save the id for each rotation
 
 # Process csv, finding those with the same ids as the processed galaxies
-label_list = []
-for id in id_list:
-  id_row = solutions.loc[solutions['GalaxyID']==id]
-  elliptical = np.asarray(id_row['Class1.1'])[0]
-  spiral = np.asarray(id_row['Class1.2'])[0]
+label_list = [] # each label will be formatted as [% elliptical, % spiral]
+for id in id_list: # for each id, accounting for all rotations
+  id_row = solutions.loc[solutions['GalaxyID']==id] # the row with associated ID
+  elliptical = np.asarray(id_row['Class1.1'])[0] # % users classified as elliptical
+  spiral = np.asarray(id_row['Class1.2'])[0] # % users classified as spiral
   if (elliptical > spiral):
     label_list.append(np.asarray([1, 0]))
   else:
@@ -138,48 +144,63 @@ for id in id_list:
 
 # turn lists into dataframe columns
 galaxy_data = pd.DataFrame()
-galaxy_data['Image_Array'] = img_list
+galaxy_data['Image_Array'] = img_list # created 4216 data points from original 527
 galaxy_data['Classification'] = label_list
 galaxy_data['GalaxyID'] = id_list
 galaxy_data
 
-"""# Model 1- classifying spiral galaxies from elliptical galaxies"""
+"""# Model 1- classifying spiral galaxies from elliptical galaxies
 
+In this section, the pre-processed data is split into train and test sets, then the model is compiled and trained with 80% of the above data. Because this process takes over 30 minutes to complete, the model is saved for later evaluation without having to re-fit.
+"""
+
+# split data into train and test sets, with 80% of the data being used to train by convention
 x_train, x_test, y_train, y_test = train_test_split(galaxy_data['Image_Array'].to_list(),
                                                     galaxy_data['Classification'].to_list(),
                                                     test_size = .2,
-                                                    random_state=42) # 80/20 rule fpr 20% test set
+                                                    random_state=42) # 80/20 rule for 20% test set
 print("x_train size: \t", len(x_train))
 print("x_test size: \t", len(x_test))
-x_train[0].shape
+x_train[0].shape # checking shape that will be loaded into the model
 
-model_1 = keras.Sequential()
+model_1 = keras.Sequential() # a Sequential model means that each step will be completed one after the other
 
+''' First convolutional layer finds high-level features '''
 model_1.add(Conv2D(64, (3, 3), input_shape=(50, 50, 3))) # filters (in powers of 2), kernel_size (square 1, 3, 5, or 7)
 model_1.add(PReLU()) # Parameterized ReLU- x>0, y=x; x<0, y=ax with a as a learning coefficient
 model_1.add(MaxPooling2D()) # find the most prominent features in the image and reduce dimensionality
 model_1.add(Dropout(.2)) # combat overfitting by randomly droping 20% of the neurons/features
 
+''' Second convolutional layer fins more fine features '''
 model_1.add(Conv2D(128, (3, 3))) # allows the model to find features within the image
 model_1.add(PReLU())
 model_1.add(MaxPooling2D()) # allows the model to be more lenient on where the the galaxy is positioned in the image
-model_1.add(Dropout(.2)) #''' read paper https://jmlr.org/papers/v15/srivastava14a.html on dropout '''
-model_1.add(Flatten())
+model_1.add(Dropout(.2))
+model_1.add(Flatten()) # flatten the output from the convolutional layers to be used in a trasitional neural network
 
-model_1.add(Dense(512))
-model_1.add(PReLU())
+''' Dense layer groups features together that will determine the type of galaxy '''
+model_1.add(Dense(512)) # neural network with 512 neurons, each with weights and biases from the previous layer and to the next layer
+model_1.add(PReLU()) # PReLU activation function is linear when incoming data is positive, multiplying negative data with a changing constant
 
-model_1.add(Dense(2, activation='softmax'))
+''' Final Dense layer provides output as a percentage chance that the galaxy is elliptical/spiral '''
+model_1.add(Dense(2, activation='softmax')) # softmax activation allows data to be interpreted as precentages
 
-model_1.summary()
+model_1.summary() # the final model has over 8 million trainable parameters
 
+# compile and fit the model with the Adam optimizer, which changes the learning rate as appropriate
+# I chose to use the Adam optimizer because it is my standard optimizer of choice and adapts the model's learning rate well to not overcorrect
 model_1.compile(loss=keras.losses.binary_crossentropy, optimizer=keras.optimizers.Adam(learning_rate=.001), metrics=['accuracy'])
-model_1.fit(np.asarray(x_train), np.asarray(y_train), epochs=50, verbose=True)
+model_1.fit(np.asarray(x_train), np.asarray(y_train), epochs=50, verbose=True) # fit the model with training data over 50 epochs
+
+"""Trained model has a accuracy rating of over 95%. This is good for only 50 epochs, as more runs through the model can cause it to overfit to the training data and generalize to new data porrly."""
 
 # save model (takes around 30 minutes to complete with 96% accuracy at last epoch)
 model_1.save('drive/MyDrive/GalaxyClassification/Model_1')
 
-"""# Model 1- evaluate"""
+"""# Model 1- evaluate
+
+In this section, I evaluate the first model that classifies galaxies as either elliptical or spiral. Its accuracy score on the test set can help tell how easily the model generalizes to new data, with good generalization being the mark of a good model.
+"""
 
 # load model
 saved_model_1 = load_model('drive/MyDrive/GalaxyClassification/Model_1')
@@ -191,18 +212,20 @@ test_eval = saved_model_1.evaluate(np.asarray(x_test), np.asarray(y_test), verbo
 print("Train loss, accuracy: %s, %s" % (train_eval[0], train_eval[1]))
 print("Test loss, accuracy: %s, %s" % (test_eval[0], test_eval[1]))
 
-"""The numbers shown above, with 93.3% accuracy on the train set and 93.8% training on the test set, show that the model is able to generalize very well to differentiate between sprial and elliptical galaxies not in its training data."""
+"""The numbers shown above, with 99% accuracy on the train set and 78.3% training on the test set, show that the model is able to generalize fairly well to differentiate between spiral and elliptical galaxies, considering that a blind guessing model would have an accuracy rating of 50%."""
 
 # evaluate the model visibly, with new data
 spiral_image = Image.open('drive/MyDrive/GalaxyClassification/eval_images/names_set/notBarred_2_100186.jpg')
 spiral_array = img_to_array(crop_galaxy(spiral_image).resize((50, 50)))
 spiral_prediction = saved_model_1.predict(np.expand_dims(spiral_array, axis=0))
 print("Model_1 Prediction: " + str(format(spiral_prediction[0][0], "2f")) 
-        + " spiral, " + str(format(spiral_prediction[0][1], "2f")) + " elliptical")
+        + " elliptical, " + str(format(spiral_prediction[0][1], "2f")) + " spiral")
 for layer, color in enumerate(['r','g','b']):
     pd.Series(spiral_array[:,:,layer].flatten()).plot.density(c=color)
 
 Image.open('drive/MyDrive/GalaxyClassification/eval_images/names_set/notBarred_2_100186.jpg').resize((250,250))
+
+"""The graph above show the RGB pixel densities for the accompanying image. I chose to plot this graph because spiral galaxies generally have more active star formatin and tend to be bluer than ellipticals, and I wanted to see if the model took color into account. This particular image seems to have more blue in it than red or green, however the actual galaxy itself seems to be a mix of red and green, resulting in a yellow color."""
 
 ell_image = Image.open('drive/MyDrive/GalaxyClassification/eval_images/names_set/midE_2_108692.jpg')
 ell_array = img_to_array(crop_galaxy(ell_image).resize((50, 50)))
@@ -215,45 +238,78 @@ for layer, color in enumerate(['r','g','b']):
 Image.open('drive/MyDrive/GalaxyClassification/eval_images/names_set/midE_2_108692.jpg').resize((250,250))
 # smallE_5_170648, midE_3_113516
 
-"""# Data preprocessing for barred spirals and ellipticities"""
+"""# Data preprocessing for barred spirals and ellipticities
 
+This section does additional preprocessing of the original table to get whether a spiral galaxy is edge on (whether it is barred cannot be determined), not barred, or barred, and whather an elliptical galaxy is in the range E0-E1, E2-E5, or E6-E7. I chose these ranges because users are likely to be biased towards choosing "in between" rather than "round" or "cigar-shaped."
+"""
+
+# define new columns as the esixsting column holding a list so they are primed to hold our new classifications
 galaxy_data['Ellipticity'] = galaxy_data['Classification']
 galaxy_data['EdgeOn_Not_or_Bar'] = galaxy_data['Classification']
-for index in range(len(galaxy_data)):
+
+# add more specific classifications based on the original
+# formatted as [% E0-1, % E2-5, % E6-7]
+for index in range(len(galaxy_data)): # go through each row in the dataframe
   id_row = solutions.loc[solutions['GalaxyID']==galaxy_data['GalaxyID'][index]]
   elliptical = galaxy_data['Classification'][index][0]
   spiral = galaxy_data['Classification'][index][1]
+  # determine ellipticity if elliptical
   if (elliptical > spiral):
-    galaxy_data.at[index, 'EdgeOn_Not_or_Bar'] = np.nan
+    galaxy_data.at[index, 'EdgeOn_Not_or_Bar'] = np.nan # do not classify spiral features
+
+    # ellipticity is based on Task 7 / Task 1 for elliptical choice
+    # due to original table values being multiplied by the choice leading to it
     e0_e1 = np.asarray(id_row['Class7.1'])[0] / np.asarray(id_row['Class1.1'])[0]
     e2_e3_e4_e5 = np.asarray(id_row['Class7.2'])[0] / np.asarray(id_row['Class1.1'])[0]
     e6_e7 = np.asarray(id_row['Class7.3'])[0] / np.asarray(id_row['Class1.1'])[0]
+
+    # very round, likely E0 or E1
     if ((e0_e1 > e2_e3_e4_e5) and (e0_e1 > e6_e7)):
       galaxy_data.at[index, 'Ellipticity'] = np.asarray([1, 0, 0])
+
+    # in-between, likely E2-E5
     elif ((e2_e3_e4_e5 > e0_e1) and (e2_e3_e4_e5 > e6_e7)):
       galaxy_data.at[index, 'Ellipticity'] = np.asarray([0, 1, 0])
+
+    # cigar-shaped, likely E6 or E7
     else:
       galaxy_data.at[index, 'Ellipticity'] = np.asarray([0, 0, 1])
+  # otherwise, based on what we can classify with our data, we say the galaxy is spiral
   else:
-    galaxy_data.at[index, 'Ellipticity'] = np.nan
+    galaxy_data.at[index, 'Ellipticity'] = np.nan # do not classify ellipticity
+
+    # edge on Task is Task 2; if edge on, whether the galaxy is barred won't be possible to classify
+    # based on edge on Task 2 / Task 1 decision on if it's spiral
     edge_on = np.asarray(id_row['Class2.1'])[0] / np.asarray(id_row['Class1.2'])[0]
     if (edge_on > (np.asarray(id_row['Class2.2'])[0] / np.asarray(id_row['Class1.2'])[0])):
       galaxy_data.at[index, 'EdgeOn_Not_or_Bar'] = np.asarray([1, 0, 0])
+
+    # not edge on, so classify whether it is barred based on Task 3 / Task 2 (not edge on)
     else:
       bar = np.asarray(id_row['Class3.1'])[0] / (np.asarray(id_row['Class2.2'])[0] + .00001)
+
+      # barred
       if (bar > (np.asarray(id_row['Class3.2'])[0] / (np.asarray(id_row['Class2.2'])[0] + .00001))):
         galaxy_data.at[index, 'EdgeOn_Not_or_Bar'] = np.asarray([0, 0, 1])
+
+      # not barred
       else:
         galaxy_data.at[index, 'EdgeOn_Not_or_Bar'] = np.asarray([0, 1, 0])
-galaxy_data
 
+galaxy_data # preview the amended dataframe
+
+# split data into elliptical galaxies for Model 3, spiral for Model 2
 mask = galaxy_data['Ellipticity'].isnull()
 spiral_data = galaxy_data[mask]
 elliptical_data = galaxy_data[~mask]
 spiral_data
 
-"""# Model 2- classifying edge on spirals (unable to tell if barred), non-barred spirals, and barred spirals"""
+"""# Model 2- classifying edge on spirals (unable to tell if barred), non-barred spirals, and barred spirals
 
+This section splits the data into train and test sets, then trains a new model to classify whether spiral galaxies are barred.
+"""
+
+# 20% of data going into test set
 x_bar_train, x_bar_test, y_bar_train, y_bar_test = train_test_split(spiral_data['Image_Array'].to_list(),
                                                                     spiral_data['EdgeOn_Not_or_Bar'].to_list(),
                                                                     test_size = .2,
@@ -261,6 +317,7 @@ x_bar_train, x_bar_test, y_bar_train, y_bar_test = train_test_split(spiral_data[
 print("x_bar_train size: \t", len(x_bar_train))
 print("x_bar_test size: \t", len(x_bar_test))
 
+# very similar model to Model 1
 model_bar = keras.Sequential()
 model_bar.add(Conv2D(64, (3, 3), input_shape=(50, 50, 3))) # filters (in powers of 2), kernel_size (square 1, 3, 5, or 7)
 model_bar.add(PReLU()) # Parameterized ReLU- x>0, y=x; x<0, y=ax with a as a learning coefficient
@@ -280,13 +337,19 @@ model_bar.add(Dense(3, activation='softmax'))
 
 model_bar.summary()
 
+# compile and fit model with same parameters as Model 1
 model_bar.compile(loss=keras.losses.binary_crossentropy, optimizer=keras.optimizers.Adam(learning_rate=.001), metrics=['accuracy'])
 model_bar.fit(np.asarray(x_bar_train), np.asarray(y_bar_train), epochs=50, verbose=True)
 
-# save model (takes around 30 minutes to complete with 96% accuracy at last epoch)
+"""98.8% accuracy over 50 epochs for 1700 training images"""
+
+# save model (takes around 30 minutes to complete with 99% accuracy at last epoch)
 model_bar.save('drive/MyDrive/GalaxyClassification/Model_Bar')
 
-"""# Model 2- evaluate"""
+"""# Model 2- evaluate
+
+This section evaluates Model 2, which classifies whether a spiral galaxy is edge on, not barred, or barred.
+"""
 
 # load model
 saved_model_bar = load_model('drive/MyDrive/GalaxyClassification/Model_Bar')
@@ -298,6 +361,9 @@ test_eval_bar = saved_model_bar.evaluate(np.asarray(x_bar_test), np.asarray(y_ba
 print("Train loss, accuracy: %s, %s" % (train_eval_bar[0], train_eval_bar[1]))
 print("Test loss, accuracy: %s, %s" % (test_eval_bar[0], test_eval_bar[1]))
 
+"""76.8% accuracy on the test set is great, especially considering that a guessing model would only get 33% accuracy."""
+
+# quick function to predict and graph RGB pixel desities based on an image
 def single_image_eval_bar(image_path):
   sieb_image = Image.open(image_path)
   sieb_array = img_to_array(crop_galaxy(sieb_image).resize((50, 50)))
@@ -323,8 +389,12 @@ single_image_eval_bar('drive/MyDrive/GalaxyClassification/eval_images/names_set/
 
 Image.open('drive/MyDrive/GalaxyClassification/eval_images/names_set/edgeOn_1_107946.jpg').resize((250,250))
 
-"""# Model 3- classifying galaxies based on ellipticity (E0-1, E2-5, E6-7)"""
+"""# Model 3- classifying galaxies based on ellipticity (E0-1, E2-5, E6-7)
 
+This section splits the elliptical data, and trains Model 3 to classify whether a galaxy is more round, cigar-shaped, or in-between.
+"""
+
+# 20% of data goes to test set to evaluate model generalizability
 x_ell_train, x_ell_test, y_ell_train, y_ell_test = train_test_split(elliptical_data['Image_Array'].to_list(),
                                                                     elliptical_data['Ellipticity'].to_list(),
                                                                     test_size = .2,
@@ -332,6 +402,7 @@ x_ell_train, x_ell_test, y_ell_train, y_ell_test = train_test_split(elliptical_d
 print("x_ell_train size: \t", len(x_ell_train))
 print("x_ell_test size: \t", len(x_ell_test))
 
+# Model is similar to Models 1 and 2
 model_ell = keras.Sequential()
 model_ell.add(Conv2D(64, (3, 3), input_shape=(50, 50, 3))) # filters (in powers of 2), kernel_size (square 1, 3, 5, or 7)
 model_ell.add(PReLU()) # Parameterized ReLU- x>0, y=x; x<0, y=ax with a as a learning coefficient
@@ -351,13 +422,19 @@ model_ell.add(Dense(3, activation='softmax'))
 
 model_ell.summary()
 
+# compile and train model with same parameters as Models 1 and 2
 model_ell.compile(loss=keras.losses.binary_crossentropy, optimizer=keras.optimizers.Adam(learning_rate=.001), metrics=['accuracy'])
 model_ell.fit(np.asarray(x_ell_train), np.asarray(y_ell_train), epochs=50, verbose=True)
 
-# save model (takes around 30 minutes to complete with 96% accuracy at last epoch)
+"""96.5% accuracy over 50 epochs"""
+
+# save model (takes around 30 minutes to complete with 97% accuracy at last epoch)
 model_ell.save('drive/MyDrive/GalaxyClassification/Model_Ell')
 
-"""# Model 3- evaluate"""
+"""# Model 3- evaluate
+
+This section evaluates Model 3, which classifies elliptical galaxies based on their percieved ellipticity
+"""
 
 # load model
 saved_model_ell = load_model('drive/MyDrive/GalaxyClassification/Model_Ell')
@@ -369,6 +446,9 @@ test_eval_ell = saved_model_ell.evaluate(np.asarray(x_ell_test), np.asarray(y_el
 print("Train loss, accuracy: %s, %s" % (train_eval_ell[0], train_eval_ell[1]))
 print("Test loss, accuracy: %s, %s" % (test_eval_ell[0], test_eval_ell[1]))
 
+"""78.8% accuracy on the test set shows that the model generalizes well, which for me is especially impressive because of the uncertainty in how users would classify mid-range ellipticals."""
+
+# similar to definition in Model 2, only difference being the model used to classify
 def single_image_eval_ell(image_path):
   siee_image = Image.open(image_path)
   siee_array = img_to_array(crop_galaxy(siee_image).resize((50, 50)))
